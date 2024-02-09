@@ -1,0 +1,452 @@
+---
+title: |
+  ![](IFAS.png){width=10%}
+
+  Practice 3 - GS
+author: 
+  - Marcio Resende, Professor^[University of Florida, mresende@ufl.edu]
+  - Paul Adunola, PhD student^[University of Florida, https://pauliben.github.io/pauladunola.github.io/index.html]
+date: "2023-11-16"
+output: 
+  html_document:
+    toc: true
+    toc_float: FALSE
+    theme: flatly
+    highlight: haddock
+    css: custom.css
+bibliography: references.bib 
+---
+
+```{=html}
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+```
+
+## Introduction
+
+This script was developed using a subset of advanced selections of the University of Florida blueberry breeding program. The population is made up of 138 individuals phenotyped for a moderately heritable trait and genotyped with targeted sequence capture that yielded ~40k SNPs after dosage allele calling. In this hands-on, the optimization of genomic selection (GS) was presented for optimizing (i) training size (TSO) and; (ii) marker size (MSO).
+
+### Load libraries
+
+```{r echo=T, results='hide'}
+#On windows, install rtools
+#On MAC Install Xcode from apple, and gfortran6.3 or gfortran8.2 from 
+#https://cran.r-project.org/bin/macosx/tools/
+#Download and install  gfortran-12.2-universal.pkg
+#Please install also Rcpp and Rcpp-Armadillo packages.
+
+#library(devtools)
+#install_github("TheRocinante-lab/TrainSel")
+
+#Load libraries
+library(TrainSel)
+library(AGHmatrix)
+library(rrBLUP)
+library(dplyr)
+library(readr)
+
+```
+
+### Load data
+
+```{r}
+load("~/Mol Breed GS Practice/mb.class.v2.rda",verbose = T)
+```
+
+### Construct G
+
+```{r}
+G = Gmatrix(geno_dat,ploidy = 4)
+
+```
+
+## Training Size Optimization (TSO)
+
+For TSO, two approaches was tested. Firstly, random selection of a defined number of individuals (size). The sampling for `size` (used as training set) was repeated `rep` times. For the second approach, CDMean algorithm was employed from TrainSel [@akdemirtrainsel] R package. 
+
+### Random TSO
+
+**Example 1**
+
+Here, y is the vector of the phenotype while G is the Gmatrix. In this example, a `seed` is used to randomly sample individuals used as training set (TS).
+
+```{r}
+set.seed(123)
+size = 25
+y = pheno_dat$trait1
+n = c(1:length(y))
+rand = sample(n, size, F)
+test = n[-rand]
+yNA = y
+yNA[test] = NA
+#Fit - gblub
+fit = mixed.solve(yNA, K=G)
+yhat = fit$u[test]
+r2 = cor(yhat, y[test],use="complete")
+print(r2)
+
+rm(list = c("size","y","rand","n","r2","yNA","fit","yhat","test")) #clear workspace
+
+```
+
+In other to allow for fair representation of all individuals in the population, random sampling was employed to repeatedly select the individuals used as TS with different seeds (5 times). Ideally, this should be repeated about 100 times but kept to 5 for simplicity. 
+
+
+```{r echo=T, results='hide'}
+#Create a function for random TS
+gblup_ts_rand = function(rep,size,y,G){
+  r2_gb = vector()
+  #Set seed to randomly sample rep numbers
+  set.seed(123)
+  mod.seed=sample(1:10000,rep,F)
+  for (i in 1:rep) {
+    set.seed(mod.seed[i])
+    n = c(1:length(y))
+    rand = sample(n, size, F)
+    test = n[-rand]
+    y[is.nan(y)]<-NA; yNA = y
+    yNA[test] = NA
+    #Fit - gblub
+    fit = mixed.solve(yNA, K=G)
+    yhat = fit$u[test]
+    r2_gb[i] = cor(yhat, y[test],use="complete")
+  }
+  return(list(gblup=r2_gb))
+}
+
+#Random selection
+#25 individuals
+rand_25 = gblup_ts_rand(rep=50,size=25,y=pheno_dat$trait1,G=G)
+#50 individuals
+rand_50 = gblup_ts_rand(rep=50,size=50,y=pheno_dat$trait1,G=G)
+#75 individuals
+rand_75 = gblup_ts_rand(rep=50,size=75,y=pheno_dat$trait1,G=G)
+
+```
+
+## Optimization of the TS by a genetic algorithm (CDMean)
+
+Mean coefficient of determination (CDMean) is the expected correlation between the true and predicted genotypic values. Read Laloë (1993) [@laloeprecision] and Rincent et al. (2012) [@rincentmaximizing] for more information. CDMean can be used to measure the suitability of a training set to make predictions over a target population (Fernández-González et al., 2022) [@fernandeza]. CDMean depends on the linear mixed models. 
+
+$$y = X\beta + Zu + e$$
+
+**Example 2**
+
+```{r}
+TSC = TrainSelControl()
+TSC$niterations = 1000 #Number of iterations
+
+#Select CDmean-Optimal subset of 25, 50, 75 samples
+
+dataCDMEANopt = list(G = G, lambda = 1)
+
+CDMEANOPT = function(soln, Data){
+  G = Data[["G"]]
+  lambda = Data[["lambda"]]
+  Vinv = solve(G[soln,soln]+lambda*diag(length(soln)))
+  outmat = (G[,soln]%*%(Vinv-(Vinv%*%Vinv)/sum(Vinv))%*%G[soln,])/G
+  return(mean(diag(outmat[-soln,-soln])))
+}
+
+#Set seed to randomly sample 5 numbers
+set.seed(123)
+mod.seed=sample(1:10000,5,F)
+
+#Optimal 25
+TSOUTCD_25 = list()
+for (i in 1:length(mod.seed)) {
+  set.seed(mod.seed[i])
+  selected = TrainSel(Data = dataCDMEANopt,
+                      Candidates = list(1:nrow(G)),
+                      setsizes = c(25),
+                      settypes = "UOS",
+                      Stat = CDMEANOPT, control = TSC)
+  TSOUTCD_25[[i]] = rownames(G)[selected$BestSol_int]
+}
+TSOUTCD_25 = do.call('cbind',TSOUTCD_25)
+write.csv(TSOUTCD_25, file = "TSOUTCD_25.csv", row.names = F)
+
+#Optimal 50
+TSOUTCD_50 = list()
+for (i in 1:length(mod.seed)) {
+  set.seed(mod.seed[i])
+  selected = TrainSel(Data = dataCDMEANopt,
+                      Candidates = list(1:nrow(G)),
+                      setsizes = c(50),
+                      settypes = "UOS",
+                      Stat = CDMEANOPT, control = TSC)
+  TSOUTCD_50[[i]] = rownames(G)[selected$BestSol_int]
+}
+TSOUTCD_50 = do.call('cbind',TSOUTCD_50)
+write.csv(TSOUTCD_50, file = "TSOUTCD_50.csv", row.names = F)
+
+#Optimal 75
+TSOUTCD_75 = list()
+for (i in 1:length(mod.seed)) {
+  set.seed(mod.seed[i])
+  selected = TrainSel(Data = dataCDMEANopt,
+                      Candidates = list(1:nrow(G)),
+                      setsizes = c(75),
+                      settypes = "UOS",
+                      Stat = CDMEANOPT, control = TSC)
+  TSOUTCD_75[[i]] = rownames(G)[selected$BestSol_int]
+}
+TSOUTCD_75 = do.call('cbind',TSOUTCD_75)
+write.csv(TSOUTCD_75, file = "TSOUTCD_75.csv", row.names = F)
+
+#Visualizing convergence
+plot(selected$maxvec, xlab = "Iteration", ylab = "Obj-Func Max Value")
+
+```
+
+**Load saved selections**
+
+```{r echo=T, results='hide'}
+#cdmean 25
+TSOUTCD_25 <- read_csv("TSOUTCD_25.csv"); TSOUTCD_25 = data.frame(TSOUTCD_25)
+#cdmean 50
+TSOUTCD_50 <- read_csv("TSOUTCD_50.csv"); TSOUTCD_50 = data.frame(TSOUTCD_50)
+#cdmean 75
+TSOUTCD_75 <- read_csv("TSOUTCD_75.csv"); TSOUTCD_75 = data.frame(TSOUTCD_75)
+
+```
+
+### Comparison of TSO
+
+**Function to run gblup gs: opt and k-fold CVs**
+
+`gs_opt` function runs gblup genomic prediction with the five reps of selected individuals from optimization algorithm. Additionally, `gblup_gs` function runs 10 fold cross-validation for the full dataset. This was used to compare the TSO outputs.
+
+```{r echo=T, results='hide'}
+
+gs_opt = function(G,train_ind,pheno,trait){
+  trait_id = which(names(pheno)==trait)
+  y = pheno[,trait_id]
+  r2_gb = vector()
+  reps = ncol(train_ind)
+  for (i in 1:reps) {
+    sel = train_ind[,i]
+    test = which(!pheno[,1] %in% sel)
+    yNA = y; yNA[test] = NA
+    #Fit - gblub
+    fit = mixed.solve(yNA, K=G)
+    yhat = fit$u[test]
+    r2_gb[i] = cor(yhat, y[test],use="complete")
+  }
+  return(list(gblup=r2_gb))
+}
+
+#10 Folds CV
+gblup_gs = function(G,y,reps){
+  set.seed(123)
+  seed=sample(1:10000,reps,F)
+  rep_r2 = list();
+  for (i in 1:reps) {
+    set.seed(seed[i])
+    print(i)
+    folds=sample(1:10,size=length(y),replace=T)
+    y[is.nan(y)]<-NA
+    
+    r2 = vector()
+    for (j in 1:max(folds)) {
+      test = which(folds==j)
+      yNA = y; yNA[test] = NA
+      #Fit
+      fit = mixed.solve(yNA, K=G)
+      yhat = fit$u[test]
+      r2[j] = cor(yhat, y[test],use="complete")
+    }
+    rep_r2[[i]] = r2
+  }
+  return(rep_r2)
+}
+
+cd_25 = gs_opt(G,TSOUTCD_25,pheno_dat,"trait1")
+cd_50 = gs_opt(G,TSOUTCD_50,pheno_dat,"trait1")
+cd_75 = gs_opt(G,TSOUTCD_75,pheno_dat,"trait1")
+all = gblup_gs(G,pheno_dat$trait1,5)
+
+```
+
+### TSO summary
+
+```{r}
+size = c(25, 50, 75, "all")
+random = c(mean(rand_25$gblup),mean(rand_50$gblup),
+           mean(rand_75$gblup),mean(unlist(all)))
+cdmean = c(mean(cd_25$gblup,na.rm=T),mean(cd_50$gblup,na.rm=T),
+           mean(cd_75$gblup,na.rm=T),mean(unlist(all)))
+tso = data.frame(Size=size,Random=random,CDMean=cdmean)
+knitr::kable(tso)
+
+```
+
+## Marker Size Optimization (MSO)
+
+**Example 3**
+
+In this example, a defined number of snp markers were randomly sampled to fit genomic prediction models. However, there are other data-driven and genetic methods in literature (MAF, mismatch rate, LD, Call rate etc.) for informed mso (Kainer et al., 2018) [@kaineraccuracy]. In the example below, 10k snps were randomly selected.
+
+```{r}
+set.seed(123)
+#Select random index
+size = 10000
+sel = sample(1:ncol(geno_dat), size, replace = F)
+rand_snp = geno_dat[,sel];
+#Select snps
+n=length(pheno_dat$trait1); k=10         
+#set folds
+folds=sample(1:k,size=n,replace=T) 
+#construct g matrix
+G_sel = Gmatrix(rand_snp,ploidy = 4)
+y = pheno_dat$trait1
+
+#10 cv
+r2 = vector()                       
+for(i in 1:max(folds)){ 
+  test = which(folds==i)
+  yNA = y
+  yNA[test] = NA
+  #Fit - gblup
+  fit = mixed.solve(yNA, K=G_sel)
+  yhat = fit$u[test]
+  r2[i] = cor(yhat, y[test],use="complete")
+}
+mean(r2,na.rm=T)
+
+rm(list = c("size","sel","rand_snp","n","folds","G_sel","r2","yNA","fit","yhat","test"))
+
+```
+
+### Comparison of MSO: GBlup vs RRBlup
+
+In the example below, the snp markers were randomly selected with different seeds repeatedly (5 times) to avoid bias using `gblup` and `rrblup` models.
+
+```{r echo=T, results='hide'}
+#random marker size selection: gblup
+rand_gblup_probes = function(snp,pheno,trait,size){
+  reps = list()
+  
+  #Set seed to randomly sample 5 numbers
+  set.seed(123)
+  mod.seed=sample(1:10000,5,F)
+  
+  trait_id = which(names(pheno)==trait)
+  y = pheno[,trait_id]; y[is.nan(y)]<-NA
+  for (j in 1:length(mod.seed)) {
+    print(j)
+    #Set seed
+    set.seed(mod.seed[j])
+    #Select random index
+    sel = sample(1:ncol(snp), size, replace = F)
+    rand_snp = snp[,sel];
+    #Select snps
+    n=length(y); k=10         
+    #set folds
+    folds=sample(1:k,size=n,replace=T) 
+    #construct g matrix
+    G_sel = Gmatrix(rand_snp,ploidy = 4)
+    
+    #10 cv
+    r2 = vector()                       
+    for(i in 1:max(folds)){ 
+      test = which(folds==i)
+      yNA = y
+      yNA[test] = NA
+      #Fit - gblup
+      fit = mixed.solve(yNA, K=G_sel)
+      yhat = fit$u[test]
+      r2[i] = cor(yhat, y[test],use="complete")
+    }
+    reps[[j]]=r2
+  }
+  print(dim(rand_snp));print(rand_snp[1:5,1:5])
+  return(reps)
+}
+
+#imputation function
+imputation = function(dat){
+  if (any(is.na(dat))) {
+    imputvalue = apply(dat, 2, mean, na.rm = TRUE)
+    ix = which(is.na(dat), arr.ind = TRUE)
+    dat[ix] = imputvalue[ix[, 2]]
+  }
+  return(dat)
+}
+
+#random marker size selection: rrblup
+rand_rr_probes = function(snp,pheno,trait,size){
+  reps = list()
+  
+  #Impute missing data
+  snp = imputation(snp)
+  
+  #Set seed to randomly sample 5 numbers
+  set.seed(123)
+  mod.seed=sample(1:10000,5,F)
+  
+  trait_id = which(names(pheno)==trait)
+  y = pheno[,trait_id]; y[is.nan(y)]<-NA
+  for (j in 1:length(mod.seed)) {
+    print(j)
+    #Set seed
+    set.seed(mod.seed[j])
+    #Select random index
+    sel = sample(1:ncol(snp), size, replace = F)
+    rand_snp = snp[,sel];
+    #Select snps
+    n=length(y); k=10         
+    #set folds
+    folds=sample(1:k,size=n,replace=T) 
+    
+    #10 cv
+    r2 = vector()                       
+    for(i in 1:max(folds)){ 
+      test = which(folds==i)
+      y_train=y[-test];   y_test = y[test]
+      x_train= rand_snp[-test,]; x_test= rand_snp[test,]
+      #Fit
+      fit = mixed.solve(y_train, x_train)
+      yhat = x_test %*% fit$u
+      r2[i] = cor(yhat, y_test,use="complete")
+    }
+    reps[[j]]=r2
+  }
+  return(reps)
+}
+
+rand_gblup_1k = rand_gblup_probes(geno_dat,pheno_dat,"trait1",1000)
+rand_gblup_5k = rand_gblup_probes(geno_dat,pheno_dat,"trait1",5000)
+rand_gblup_10k = rand_gblup_probes(geno_dat,pheno_dat,"trait1",10000)
+rand_gblup_20k = rand_gblup_probes(geno_dat,pheno_dat,"trait1",20000)
+
+rand_rr_1k = rand_rr_probes(geno_dat,pheno_dat,"trait1",1000)
+rand_rr_5k = rand_rr_probes(geno_dat,pheno_dat,"trait1",5000)
+rand_rr_10k = rand_rr_probes(geno_dat,pheno_dat,"trait1",10000)
+rand_rr_20k = rand_rr_probes(geno_dat,pheno_dat,"trait1",20000)
+
+
+```
+
+### MSO summary
+
+```{r}
+size = c(1000, 5000, 10000, 20000)
+gblup = c(mean(unlist(rand_gblup_1k),na.rm=T),mean(unlist(rand_gblup_5k),na.rm=T),
+          mean(unlist(rand_gblup_10k),na.rm=T),mean(unlist(rand_gblup_20k),na.rm=T))
+rrblup = c(mean(unlist(rand_rr_1k),na.rm=T),mean(unlist(rand_rr_5k),na.rm=T),
+           mean(unlist(rand_rr_10k),na.rm=T),mean(unlist(rand_rr_20k),na.rm=T))
+mso = data.frame(Size=size,GBlup=gblup,RRBlup=rrblup)
+
+knitr::kable(mso)
+
+```
+
+### References
+
+::: {#refs}
+:::
+
